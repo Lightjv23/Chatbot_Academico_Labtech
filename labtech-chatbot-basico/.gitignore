@@ -1,0 +1,8 @@
+# Segredos e ambiente local
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Base de conhecimento institucional: não é versionada por privacidade
+knowledge_base/
