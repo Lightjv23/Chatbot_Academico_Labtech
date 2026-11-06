@@ -1,0 +1,3 @@
+-r requirements.txt
+# Somente para rodar os testes (MongoDB em memória)
+mongomock>=4.1,<5.0

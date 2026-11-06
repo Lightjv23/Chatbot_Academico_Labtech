@@ -6,11 +6,20 @@ from functools import lru_cache
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from pymongo.errors import PyMongoError
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")  # MONGODB_URI / MONGODB_DB (veja .env.example)
+
+import auth  # noqa: E402  (precisa vir depois do load_dotenv)
+import conversas  # noqa: E402
+import db  # noqa: E402
+
 CHUNKS_FILE = BASE_DIR / "knowledge_base" / "chunks.jsonl"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
@@ -24,9 +33,19 @@ app.add_middleware(CORSMiddleware, allow_origins=[
     "http://127.0.0.1:5500", "http://localhost:5500",
     "http://127.0.0.1:5501", "http://localhost:5501",
 ], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+app.include_router(auth.router)
+app.include_router(conversas.router)
+
+
+@app.exception_handler(PyMongoError)
+async def banco_indisponivel(request: Request, exc: PyMongoError):
+    print(f"Erro no MongoDB: {exc!r}")
+    return JSONResponse(status_code=503, content={"detail": "Banco de dados indisponível. Tente novamente em instantes."})
+
 
 class PerguntaRequest(BaseModel):
     pergunta: str = Field(..., min_length=1, max_length=1000)
+    conversa_id: str | None = Field(default=None, max_length=24)
 
 STOPWORDS = set("a as o os um uma uns umas de da do das dos em no na nos nas por para com sem e ou que qual quais como quando onde me minha meu minhas meus eu voce voces ao aos se ser ter tem foi sao eh e isso este esta esses essas esse essa aquele aquela aqui ali la sobre pelo pela pelos pelas ao aos um uma faz fazer faco posso pode gostaria quero saber favor por favor explica explique diga falar diz diz-me tem existe".split())
 
@@ -228,15 +247,20 @@ def saude():
             modelo_ok = any(m.get("name") == MODEL_NAME or m.get("name", "").startswith(MODEL_NAME + ":") for m in modelos)
     except (requests.RequestException, ValueError):
         pass
-    return {"status": "ok" if base_ok else "erro", "arquivo_encontrado": CHUNKS_FILE.exists(),
+    mongo_ok = db.ping()
+    return {"status": "ok" if base_ok and mongo_ok else "erro", "arquivo_encontrado": CHUNKS_FILE.exists(),
         "quantidade_trechos": quantidade, "ollama_disponivel": ollama_ok,
-        "modelo_configurado": MODEL_NAME, "modelo_instalado": modelo_ok}
+        "modelo_configurado": MODEL_NAME, "modelo_instalado": modelo_ok,
+        "mongodb_disponivel": mongo_ok}
 
 @app.post("/buscar")
-def buscar(request: PerguntaRequest):
+def buscar(request: PerguntaRequest, usuario: dict = Depends(auth.usuario_atual)):
     pergunta = request.pergunta.strip()
     if not pergunta:
         raise HTTPException(status_code=400, detail="Digite uma pergunta antes de enviar.")
+    pergunta_em = conversas.agora()
+    # Valida o dono da conversa antes de gastar tempo com o modelo (404 se não for dele).
+    conversa = conversas.obter_conversa(usuario, request.conversa_id) if request.conversa_id else None
     try:
         trechos_base = carregar_trechos_cache()
     except (OSError, json.JSONDecodeError) as exc:
@@ -249,4 +273,6 @@ def buscar(request: PerguntaRequest):
         resposta = gerar_resposta(pergunta, resultados)
     fontes = [{"documento": t["documento"], "pagina": t.get("pagina"),
         "trecho": trecho_comprovatorio(t["texto"]), "pontuacao": t["pontuacao"]} for t in resultados]
-    return {"resposta": resposta, "fontes": fontes, "modelo": MODEL_NAME}
+    # Só grava depois da resposta pronta: se o modelo falhar, não sobra pergunta órfã no histórico.
+    historico = conversas.salvar_troca(usuario, conversa, pergunta, pergunta_em, resposta, fontes, MODEL_NAME)
+    return {"resposta": resposta, "fontes": fontes, "modelo": MODEL_NAME, **historico}

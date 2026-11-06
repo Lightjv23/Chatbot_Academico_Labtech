@@ -39,8 +39,12 @@ class BuscaInstitucionalTests(unittest.TestCase):
         self.assertLessEqual(len(fonte["trecho"]), 421)
 
     def test_endpoint_resposta_sem_evidencia_nao_chama_modelo(self):
-        with patch.object(main, "gerar_resposta", return_value=main.MENSAGEM_FORA_ESCOPO) as mock_gerar:
-            resposta = main.buscar(main.PerguntaRequest(pergunta="o que é LLM"))
+        # O endpoint agora exige usuário logado e grava no MongoDB; aqui o foco é só o fluxo de busca.
+        usuario = {"_id": "usuario-de-teste", "email": "teste@cs.udf.edu.br", "apelido": "Teste"}
+        salvo = {"conversa_id": "x", "titulo": "o que é LLM", "pergunta_em": "", "resposta_em": ""}
+        with patch.object(main, "gerar_resposta", return_value=main.MENSAGEM_FORA_ESCOPO) as mock_gerar, \
+             patch.object(main.conversas, "salvar_troca", return_value=salvo):
+            resposta = main.buscar(main.PerguntaRequest(pergunta="o que é LLM"), usuario=usuario)
         mock_gerar.assert_called_once()
         self.assertEqual(resposta["fontes"], [])
         self.assertIn("opções rápidas", resposta["resposta"])
